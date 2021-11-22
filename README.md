@@ -40,7 +40,10 @@ We highly recommend using NVIDIA's Automatic Mixed Precision (AMP) for accelerat
 Install the [APEX](https://github.com/NVIDIA/apex) first and then turn on the "-fp16" option.
 ## Performance
 ### Criteria
-There are several stantard to evaluate the performance of a multi-class classification model like NER.
+There are several stantard to evaluate the performance of token classification tasks such as NER.   
+For example entity level performance or token level performance.
+In this project, we mainly consider the entity level performance.  
+
 First the simplest criteria is global accuracy. If we've got the confusion matrix, 
 
 `global accuracy = confusion_matrix.trace()/confusion_matrix.sum()`
@@ -63,7 +66,7 @@ In this project, we consider macro f1 score the most, and micro f1 score and glo
 The results after 5 epochs are as follows.
 | Model | macro f1 score |
 | ------------ | ------------- |
-| Roberta-base-batchsize8-lr2e5 | 0.986 |
+| Roberta-base-span-batchsize8-lr2e5 | 0.986 |
 
 
 ## In the future
