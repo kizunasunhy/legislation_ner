@@ -1,11 +1,11 @@
 import transformers
 from datasets import load_dataset, load_metric
 from dataset import encode_tags, NERdataset
-from transformers import AutoTokenizer, AutoModelForTokenClassification, TrainingArguments, Trainer
+from transformers import AutoTokenizer, AutoModelForTokenClassification, TrainingArguments, Trainer, RobertaConfig
 from transformers import DataCollatorForTokenClassification
 from transformers.optimization import AdamW
 from sklearn.metrics import classification_report
-from model import Bert_CRF, Roberta_CRF
+from model import Bert_CRF, Roberta_CRF, RobertaForTokenClassification
 from utils import define_label
 
 import numpy as np
@@ -142,7 +142,16 @@ def main(parser):
     val_tags = np.load(pargs.data_dir+'val_ta.npy', allow_pickle=True)
     train_texts = train_texts.tolist()
     val_texts = val_texts.tolist()
-
+    
+    train_texts_dict = {'src':[], 'tar':[]}
+    val_texts_dict = {'src':[], 'tar':[]}
+    for i in range(len(train_texts)):
+        train_texts_dict['src'].append(train_texts[i][0])
+        train_texts_dict['tar'].append(train_texts[i][1])
+    for i in range(len(val_texts)):
+        val_texts_dict['src'].append(val_texts[i][0])
+        val_texts_dict['tar'].append(val_texts[i][1])
+    
     model_checkpoint = pargs.model_checkpoint
     #"bert-base-cased", 'roberta-base', 'microsoft/mpnet-base', 'allenai/longformer-base-4096', 'nghuyong/ernie-2.0-en'
     #'google/bigbird-roberta-base', 'gpt2', 'microsoft/deberta-base', 'roberta-large'
@@ -160,10 +169,20 @@ def main(parser):
     assert isinstance(tokenizer, transformers.PreTrainedTokenizerFast)
 
     max_length = pargs.max_length
-    train_encodings = tokenizer(train_texts, is_split_into_words=True, max_length=max_length, padding=True, truncation=True,
+    train_encodings = tokenizer(train_texts_dict['src'], 
+                                train_texts_dict['tar'], 
+                                is_split_into_words=True, 
+                                max_length=max_length, 
+                                padding=True, 
+                                truncation='only_second',
                                 return_offsets_mapping=True)
-    val_encodings = tokenizer(val_texts, is_split_into_words=True, 
-                              return_offsets_mapping=True, max_length=max_length, padding=True, truncation=True)
+    val_encodings = tokenizer(val_texts_dict['src'], 
+                              val_texts_dict['tar'], 
+                              is_split_into_words=True, 
+                              return_offsets_mapping=True, 
+                              max_length=max_length, 
+                              padding=True, 
+                              truncation='only_second')
 
     #------------------------------DEFINE DATASET-----------------------
     print('Load dataset...')
@@ -173,8 +192,8 @@ def main(parser):
     else:
         label_all_tokens = False
         mask_label = -100
-    train_labels = encode_tags(train_tags, train_encodings, model_name, label_all_tokens, mask_label = mask_label)
-    val_labels = encode_tags(val_tags, val_encodings, model_name, label_all_tokens, mask_label = mask_label)
+    train_labels = encode_tags(train_tags, train_texts, train_encodings, model_name, label_all_tokens, mask_label)
+    val_labels = encode_tags(val_tags, val_texts, val_encodings, model_name, label_all_tokens, mask_label)
     train_encodings.pop("offset_mapping") # we don't want to pass this to the model
     val_encodings.pop("offset_mapping")
     train_dataset = NERdataset(train_encodings, train_labels)
@@ -190,10 +209,12 @@ def main(parser):
         optimizer = define_optimizer(model, model_name, pargs.lr, pargs.crf_lr)
         optimizers = (optimizer, None)
     else:
-        model = AutoModelForTokenClassification.from_pretrained(model_checkpoint, num_labels=len(label_list))
+        config = RobertaConfig().from_pretrained(model_checkpoint,num_labels=len(label_list))
+        config.loss_type = pargs.loss_type
+        model = RobertaForTokenClassification.from_pretrained(model_checkpoint, config=config)
+        #model = AutoModelForTokenClassification.from_pretrained(model_checkpoint, num_labels=len(label_list))
         if model_name == 'gpt2':
             model.resize_token_embeddings(new_num_tokens=tokenizer.vocab_size + num_added_tokens)
-        optimizers = (None, None)
 
     #------------------------------DEFINE TRAINER---------------------------
     m_name = model_checkpoint.split("/")[-1]
@@ -202,8 +223,6 @@ def main(parser):
         output_dir,
         evaluation_strategy = "epoch",
         learning_rate=2e-5,
-        #lr_scheduler_type='linear',
-        #warmup_steps=20,
         per_device_train_batch_size=batch_size,
         per_device_eval_batch_size=batch_size,
         num_train_epochs=10,
@@ -211,8 +230,6 @@ def main(parser):
         load_best_model_at_end=True,
         fp16=True,
         fp16_opt_level='O1',
-        logging_dir='./',
-        logging_strategy='epoch',
         weight_decay=0.01,
         push_to_hub=False,
     )
@@ -257,6 +274,7 @@ if __name__ == '__main__':
     parser.add_argument('--crf', default=False, action='store_true', help='use crf')
     parser.add_argument('--crf_lr', type=float, default=2e-2, help='learning rate')
     parser.add_argument('--lr_schedule', default=False, action='store_true', help='Using learning rate scheduler')
+    parser.add_argument('--loss_type', default='ce', help="loss calculating method, including 'ce', 'focal', 'lsr', default=cross entropy")
     parser.add_argument('--batch_size', type=int, default=8, help='learning rate')
     parser.add_argument('--max_length', type=int, default=512, help="max length of tokens")
     main(parser)

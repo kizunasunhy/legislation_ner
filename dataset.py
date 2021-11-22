@@ -2,7 +2,7 @@
 import torch
 import numpy as np
 
-def encode_tags(tags, encodings, model_name='bert', label_all_tokens=False, mask_label = -100):
+def encode_tags(tags, texts, encodings, model_name='bert', label_all_tokens=False, mask_label = -100):
     #Roberta 或者其他使用roberta的tokenizer的model都不能用offset_mapping
     #因为没法区分(1, 1), (1, 8)这种情况
     #这种情况即可以是'G(', 'express'
@@ -31,13 +31,23 @@ def encode_tags(tags, encodings, model_name='bert', label_all_tokens=False, mask
                 res=[]
                 ress = ''
                 word_ids = encodings.word_ids(i)
+                length = len(texts[i][0]) #第一句的长度
+                cnt = 0
                 for j in word_ids:
-                    if j is None or j==ress:
+                    if j is None:
+                        cnt += 1
                         res.append(mask_label)
                         continue
-                    res.append(doc_labels[j])
-                    ress = j 
-                encoded_labels.append(res)   
+                    if cnt == 3:
+                        jj = j + length
+                    else:
+                        jj = j
+                    if jj==ress:
+                        res.append(mask_label)
+                        continue
+                    res.append(doc_labels[jj])
+                    ress = jj
+                encoded_labels.append(res)  
         else:
             word_ids = encodings.word_ids(i)
             res = [mask_label if j is None else doc_labels[j] for j in word_ids]
@@ -60,3 +70,20 @@ class NERdataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.labels)
 
+class SPAN_NERdataset(torch.utils.data.Dataset):
+    def __init__(self, features):
+        self.features = features
+        
+    def __getitem__(self, idx):
+        
+        item = {}
+        item['input_ids'] = torch.tensor(self.features[idx].input_ids)
+        item['token_type_ids'] = torch.tensor(self.features[idx].segment_ids)
+        item['attention_mask'] = torch.tensor(self.features[idx].input_mask)
+        item['start_positions'] = torch.tensor(self.features[idx].start_ids)
+        item['end_positions'] = torch.tensor(self.features[idx].end_ids)
+        item['labels'] = torch.tensor(self.features[idx].subjects)
+        return item
+
+    def __len__(self):
+        return len(self.features)
