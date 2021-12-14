@@ -142,7 +142,7 @@ if __name__ == '__main__':
         # Each profile has unique bindings
         binding_idx_offset = selected_profile * num_binding_per_profile
         bindings = [0] * binding_idx_offset + [buf.binding() for buf in buffers]
-        print(bindings)
+        # print(bindings)
 
         # Specify input shapes. These must be within the min/max bounds of the active profile
         # Note that input shapes can be specified on a per-inference basis, but in this case, we only have a single shape.
@@ -181,7 +181,7 @@ if __name__ == '__main__':
             eval_start_time = time.time()
             # Copy inputs
             input_ids_batch = np.repeat(np.expand_dims(input_ids, 0), args.batch_size, axis=0)
-            print(input_ids_batch.shape)
+            # print(input_ids_batch.shape)
             input_ids_h = cuda.register_host_memory(np.ascontiguousarray(input_ids_batch.ravel()))
 
             cuda.memcpy_htod_async(d_inputs, input_ids_h, stream)
@@ -214,8 +214,6 @@ if __name__ == '__main__':
         start_position, end_position, eval_time_elapsed = inference(input_ids)
         [b.free() for b in buffers]
 
-    print(start_position, end_position)
-    print("---------------------------------")
     print("Running inference in {} batch(es) and cost {:.2} ms".format(args.batch_size, eval_time_elapsed*1000))
     print("---------------------------------")
     print("src: {}".format(src), '\n')
