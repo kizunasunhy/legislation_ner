@@ -16,7 +16,7 @@
 #
 
 """
-By Sun Hongyang.
+Written by Sun Hongyang.
 This script uses a TensorRT engine of customized span NER model
 which can predict start and end positions for 1 batch in less than 5ms.
 """
@@ -92,6 +92,8 @@ if __name__ == '__main__':
 
     src = 'in sub-paragraph (6)(a) for the words after “under paragraph (1) or regulation 7(1)” insert “under paragraph (1), regulation 7(1) or regulation 8(1)”;'
     tar_before = 'a prescribed sum is payable by that licensee in respect of a licence under paragraph (1) or regulation 7(1);'
+    #src = 'In subsection (1A) , for the words from the beginning to “under section 240 or 240A”, substitute “section 240ZA includes”.'
+    #tar_before = 'In subsection (1) the reference to a direction under section 240 or 240A includes a direction under section 246 of the Armed Forces Act 2006.'
     input_list = [src.split(' '), tar_before.split(' ')]
 
     model_checkpoint = 'roberta-base'
@@ -105,6 +107,7 @@ if __name__ == '__main__':
     test_encodings = tokenizer(input_list[0], input_list[1], is_split_into_words=True,
                                return_offsets_mapping=True, padding="max_length", max_length=max_seq_length, truncation='only_second')
     input_ids = np.asarray(test_encodings["input_ids"], dtype=np.int32, order=None)
+    attention_mask = np.asarray(test_encodings["attention_mask"], dtype=np.int32, order=None)
 
     # Import necessary plugins for BERT TensorRT
     handle = ctypes.CDLL("libnvinfer_plugin.so", mode=ctypes.RTLD_GLOBAL)
@@ -121,26 +124,30 @@ if __name__ == '__main__':
         max_output_shape = (args.batch_size, max_seq_length, 5) #5 classes for span ner
         buffers = [
             DeviceBuffer(max_input_shape),
+            DeviceBuffer(max_input_shape),
             DeviceBuffer(max_output_shape),
             DeviceBuffer(max_output_shape)
         ]
 
         # Create a stream in which to copy inputs/outputs and run inference.
         stream = cuda.Stream()
+        
         # select engine profile
         selected_profile = -1
         num_binding_per_profile = engine.num_bindings // engine.num_optimization_profiles
         for idx in range(engine.num_optimization_profiles):
             profile_shape = engine.get_profile_shape(profile_index = idx, binding = idx * num_binding_per_profile)
+            #idx=0 profile_shape=[(1, 1), (1, 256), (1, 256)]
             if profile_shape[0][0] <= args.batch_size and profile_shape[2][0] >= args.batch_size and profile_shape[0][1] <= max_seq_length and profile_shape[2][1] >= max_seq_length:
                 selected_profile = idx
                 break
         if selected_profile == -1:
             raise RuntimeError("Could not find any profile that can run batch size {}.".format(args.batch_size))
         context.set_optimization_profile_async(selected_profile, stream.handle)
-        #context.active_optimization_profile = selected_profile
-        # Each profile has unique bindings
         binding_idx_offset = selected_profile * num_binding_per_profile
+        #context.set_optimization_profile_async(selected_profile, stream.handle)
+
+        # Each profile has unique bindings
         bindings = [0] * binding_idx_offset + [buf.binding() for buf in buffers]
         # print(bindings)
 
@@ -148,28 +155,29 @@ if __name__ == '__main__':
         # Note that input shapes can be specified on a per-inference basis, but in this case, we only have a single shape.
         input_shape = (args.batch_size, max_seq_length)
         input_nbytes = trt.volume(input_shape) * trt.int32.itemsize
-
         shapes = {
-                "input_ids": (args.batch_size, max_seq_length)
-            }
+                "input_ids": (args.batch_size, max_seq_length),
+                "attention_mask": (args.batch_size, max_seq_length)
+                }
         for binding, shape in shapes.items():
             context.set_binding_shape(engine[binding] + binding_idx_offset, shape)
         assert context.all_binding_shapes_specified
 
         # Allocate device memory for inputs.
-        d_inputs = buffers[0].buf
+        d_inputs = [buffers[0].buf, buffers[1].buf]
+        #d_inputs = [cuda.mem_alloc(input_nbytes) for binding in range(2)]
         # Allocate output buffer by querying the size from the context. This may be different for different input shapes.
-        h_output1 = cuda.pagelocked_empty(tuple((1, 100, 5)), dtype=np.float32)
-        h_output2 = cuda.pagelocked_empty(tuple((1, 100, 5)), dtype=np.float32)
-        d_output1 = buffers[1].buf
-        d_output2 = buffers[2].buf
+        h_output1 = cuda.pagelocked_empty(tuple(max_output_shape), dtype=np.float32)
+        h_output2 = cuda.pagelocked_empty(tuple(max_output_shape), dtype=np.float32)
+        d_output1 = buffers[2].buf
+        d_output2 = buffers[3].buf
 
         # Warmup
         for _ in range(args.warm_up_runs):
             context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
             stream.synchronize()
 
-        def inference(input_ids):
+        def inference(input_ids, attention_mask):
             global h_output1, h_output2
 
             _NetworkOutput = collections.namedtuple(  # pylint: disable=invalid-name
@@ -181,17 +189,19 @@ if __name__ == '__main__':
             eval_start_time = time.time()
             # Copy inputs
             input_ids_batch = np.repeat(np.expand_dims(input_ids, 0), args.batch_size, axis=0)
-            # print(input_ids_batch.shape)
+            attention_mask_batch = np.repeat(np.expand_dims(attention_mask, 0), args.batch_size, axis=0)
+            # print(input_ids_batch.ravel(), attention_mask_batch.ravel())
             input_ids_h = cuda.register_host_memory(np.ascontiguousarray(input_ids_batch.ravel()))
-
-            cuda.memcpy_htod_async(d_inputs, input_ids_h, stream)
-            # Run inference
+            attention_mask_h = cuda.register_host_memory(np.ascontiguousarray(attention_mask_batch.ravel()))
             
+            cuda.memcpy_htod_async(d_inputs[0], input_ids_h, stream)
+            cuda.memcpy_htod_async(d_inputs[1], attention_mask_h, stream)
+
+            # Run inference
             context.execute_async_v2(bindings=bindings, stream_handle=stream.handle)
             # Synchronize the stream
             stream.synchronize()
             
-
             # Transfer predictions back from GPU
             cuda.memcpy_dtoh_async(h_output1, d_output1, stream)
             cuda.memcpy_dtoh_async(h_output2, d_output2, stream)
@@ -201,7 +211,7 @@ if __name__ == '__main__':
             # Only retrieve and post-process the first batch
             start_logits = np.array(h_output1[0])
             end_logits = np.array(h_output2[0])
-            #print(start_logits.shape)
+            # print(start_logits.shape)
             start_position = np.argmax(start_logits, axis=1)
             end_position = np.argmax(end_logits, axis=1)
             networkOutputs.append(_NetworkOutput(
@@ -211,9 +221,11 @@ if __name__ == '__main__':
 
             return start_position, end_position, eval_time_elapsed
 
-        start_position, end_position, eval_time_elapsed = inference(input_ids)
+        start_position, end_position, eval_time_elapsed = inference(input_ids, attention_mask)
         [b.free() for b in buffers]
 
+    # print(start_position, end_position)
+    print("---------------------------------")
     print("Running inference in {} batch(es) and cost {:.2} ms".format(args.batch_size, eval_time_elapsed*1000))
     print("---------------------------------")
     print("src: {}".format(src), '\n')
